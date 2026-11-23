@@ -1,0 +1,29 @@
+#key:for
+#key:do
+#key:while
+#key:break
+#key:continue
+#key:if
+#key:else
+#key:return
+#key:struct
+#key:switch
+#key:case
+#key:default
+1:for do while break continue if else return struct switch case default
+#key:void
+#key:int
+#key:double
+#key:float
+#key:char
+#key:const
+#key:signed
+#key:unsigned
+#key:short
+#key:long
+2:void int double float char const signed unsigned short long
+#id:_abc
+#id:ab123
+#id:Int
+#id:x_1
+3:_abc ab123 Int x_1

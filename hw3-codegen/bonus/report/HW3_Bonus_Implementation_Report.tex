@@ -1,0 +1,314 @@
+\documentclass[12pt]{article}
+\usepackage{report}
+
+\begin{document}
+
+\reporttitle{CS340400 Compiler Design - Homework 3 Bonus Implementation Report}
+
+\section{Overview}
+
+The Bonus extends the HW3 code generator to a 32-bit RISC-V target and adds four SIMD intrinsics from
+the Andes P-extension (DSP), so that the generated code can run on an Andes Corvette-F1/T1 board through
+the Arduino IDE.
+
+\begin{center}
+\begin{tabularx}{0.95\linewidth}{@{}lL@{}}
+\toprule
+Files & the same \file{scanner.l} and \file{parser.y} as HW3, as the specification requires \\
+New features & \code{--rv32} target, the \code{uint32_t} type with unsigned operations, 4 intrinsics \\
+RV32 & all 15 HW3 test programs compiled with \code{--rv32} on RV32 Spike --- \textbf{15/15 pass} \\
+Bonus tests & 5 programs in \file{bonus/testcases/}, 12 inputs each, with the P-extension emulated ---
+             \textbf{5/5 pass} \\
+Not yet verified & running on the board; whether the Andes assembler accepts the output \\
+Usage & \code{./codegen --rv32 < testcase.c} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Requirements}
+
+\begin{itemize}
+  \item Use the \emph{same} \file{scanner.l} and \file{parser.y} as HW3 and switch to 32-bit code with a
+        flag; RV64 stays the default.
+  \item On RV32, memory accesses are 4 bytes wide, with \code{lw} and \code{sw}.
+  \item Support four intrinsics that operate on the four bytes of a 32-bit value independently:
+\end{itemize}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}llL@{}}
+\toprule
+Intrinsic & Instruction & Per-byte result \\
+\midrule
+\code{__rv__ukadd8(a, b)} & \code{ukadd8 rd, rs1, rs2} & unsigned saturating add: $\min(a_i + b_i,\ 255)$ \\
+\code{__rv__uksub8(a, b)} & \code{uksub8 rd, rs1, rs2} & unsigned saturating subtract: $\max(a_i - b_i,\ 0)$ \\
+\code{__rv__cmpeq8(a, b)} & \code{cmpeq8 rd, rs1, rs2} & \code{0xFF} if $a_i = b_i$, else \code{0x00} \\
+\code{__rv__ucmplt8(a, b)} & \code{ucmplt8 rd, rs1, rs2} & \code{0xFF} if $a_i < b_i$ (unsigned), else \code{0x00} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A test program defines \code{uint32_t ext_dsp_codegen(uint32_t a, uint32_t b)}; the TA's sketch
+\file{HW3_Bonus.ino} reads two numbers from the serial port, calls it, and compares the result with
+the board's built-in intrinsics. The TA's example:
+
+\lstinputlisting[title={\codetitle{bonus/testcases/0.c}}]{../testcases/0.c}
+
+\section{Selecting the Target}
+
+HW3 already routes every size-dependent decision through five variables, so the RV32 target only has
+to change them:
+
+\snippet[language=yacc]{../../parser.y}{static int W = 8;}{+5}
+\snippet[language=yacc]{../../parser.y}{static void use_rv32}{@end}
+\snippet[language=yacc]{../../parser.y}{int main(}{@end}
+
+\code{--rv32} selects the 32-bit target. The environment variable \code{CODEGEN_TARGET=rv32} does the
+same, so a grading script that runs plain \code{./codegen < t.c} can still be pointed at RV32 without
+changing its command line. \code{--pext-emulate} is a test-only option described in
+Section~\ref{sec:verify}.
+
+Nothing else changes. Slots, array elements and pointer scaling all follow \code{W} and \code{W_SHIFT}, and
+the frame keeps its 16-byte alignment, which the ILP32 ABI also requires. For example, the prologue of a
+two-parameter function becomes:
+
+\begin{center}
+\begin{minipage}[t]{0.47\linewidth}
+\begin{lstlisting}[language=riscv,numbers=none,title={\codetitle{RV64}}]
+addi sp, sp, -32
+sd ra, 24(sp)
+sd s0, 16(sp)
+addi s0, sp, 32
+sd a0, -24(s0)
+sd a1, -32(s0)
+\end{lstlisting}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.47\linewidth}
+\begin{lstlisting}[language=riscv,numbers=none,title={\codetitle{RV32}}]
+addi sp, sp, -16
+sw ra, 12(sp)
+sw s0, 8(sp)
+addi s0, sp, 16
+sw a0, -12(s0)
+sw a1, -16(s0)
+\end{lstlisting}
+\end{minipage}
+\end{center}
+
+Because the whole HW3 suite can now run in both modes, the RV32 port is verified by the same 15 programs
+as HW3 (\code{TARGET=rv32 make test}), on Spike with \code{--isa=rv32imac} and a 32-bit proxy kernel.
+
+\section{The \texttt{uint32\_t} Type}
+
+\subsection{Scanner and grammar}
+
+\code{uint32_t} is a new token, and the grammar accepts it as a base type:
+
+\snippet[language=flex]{../../scanner.l}{"uint32_t"}{+1}
+\snippetafter{start program}
+\snippet[language=yacc]{../../parser.y}{^base_type}{@rule}
+\snippetafter{start program}
+\snippet[language=yacc]{../../parser.y}{^sign}{@rule}
+
+The semantic value of a type is a single flag: 1 for an unsigned type (\code{unsigned} \ldots or
+\code{uint32_t}), 0 otherwise. A declaration copies the flag to every declarator, and \code{sym_add} stores it in
+the symbol table:
+
+\snippetafter{start program}
+\snippet[language=yacc]{../../parser.y}{^local_decl}{@rule}
+\snippet[language=yacc]{../../parser.y}{s->is_unsigned = where}{+1}
+
+Function definitions, parameters and casts set the same flag, so return values and \code{(unsigned)x} are
+covered as well.
+
+\subsection{Which expressions are unsigned}
+
+Addition, subtraction, multiplication and the bitwise operators give the same bits whether the operands
+are signed or not. Only comparison, division, remainder and right shift differ, so the generator needs to
+know the signedness of an expression just for those. \code{is_unsigned_expr} follows C's usual arithmetic
+conversions:
+
+\snippet[language=yacc]{../../parser.y}{static int is_unsigned_expr}{@end}
+
+\begin{itemize}
+  \item a variable, array element, or dereferenced variable is unsigned if it was declared so;
+  \item a binary arithmetic or bitwise operation is unsigned if \emph{either} operand is;
+  \item a comparison or logical operation yields a plain \code{int} (0 or 1), so it is signed;
+  \item a shift takes the type of its \emph{left} operand only;
+  \item every intrinsic returns \code{uint32_t}.
+\end{itemize}
+
+\subsection{Choosing the instruction}
+
+\snippet[language=yacc]{../../parser.y}{int uns = }{const char *slt}
+
+For comparisons and division the operation is unsigned if either side is; for \code{>>} only the left side
+counts. The flag then selects the instruction:
+
+\begin{center}
+\begin{tabularx}{0.8\linewidth}{@{}lllL@{}}
+\toprule
+Operator & Signed & Unsigned & Example where they differ \\
+\midrule
+\code{< > <= >=} & \code{slt} & \code{sltu} & \code{0xFFFFFFFF > 1} \\
+\code{/} & \code{div} & \code{divu} & \code{0xFFFFFFFF / 3} \\
+\code{\%} & \code{rem} & \code{remu} & \code{0xFFFFFFFF \% 7} \\
+\code{>>} & \code{sra} & \code{srl} & \code{0x80000000 >> 28} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\note{On RV64 a \code{uint32_t} is held in a 64-bit register, so wrap-around at $2^{32}$ is not modelled
+(\code{0 - 1} becomes $2^{64} - 1$). Unsigned values are exact only with \code{--rv32}, which is the only
+mode the Bonus targets.}
+
+\section{Intrinsics}
+
+\subsection{Recognising a call}
+
+The intrinsics need no grammar changes: syntactically they are ordinary function calls. The generator keeps
+a table that maps each name to its instruction:
+
+\snippet[language=yacc]{../../parser.y}{static const Intrinsic INTRINSICS}{@end}
+
+\code{gen_call} looks the name up first. A match goes to \code{gen_intrinsic} and emits a single instruction
+instead of \code{jal}; any other name is an ordinary call (see the HW3 report).
+
+\subsection{Emitting the instruction}
+
+\snippet[language=yacc]{../../parser.y}{static void gen_intrinsic}{@end}
+
+Evaluation follows the same stack-machine rule as a binary operator: the first argument is pushed, the
+second is evaluated into \code{t0}, and the first is popped into \code{t1}. The instruction is then
+\code{<op> t0, t1, t0}: \code{rd} is \code{t0} as for any expression, \code{rs1} is the first argument and
+\code{rs2} the second. This order matters because \code{uksub8} and \code{ucmplt8} are not commutative. It
+matches the TA's hand-written sample \code{ukadd8 a5, a4, a5}, where \code{a4} holds the first argument.
+The generator also checks that exactly two arguments are given.
+
+For \code{return __rv__ukadd8(a, b);} the RV32 output is:
+
+\begin{lstlisting}[language=riscv,title={\codetitle{codegen.S (RV32), body of the function}}]
+  addi t0, s0, -12          # a
+  lw t0, 0(t0)
+  addi sp, sp, -16          # push a
+  sw t0, 0(sp)
+  addi t0, s0, -16          # b
+  lw t0, 0(t0)
+  lw t1, 0(sp)              # pop a into t1
+  addi sp, sp, 16
+  ukadd8 t0, t1, t0         # rd = t0, rs1 = a, rs2 = b
+  mv a0, t0
+\end{lstlisting}
+
+Nested calls such as \code{__rv__ukadd8(__rv__uksub8(a, b), __rv__cmpeq8(a, b))} need nothing extra: each
+inner intrinsic leaves its result in \code{t0} like any other expression.
+
+\section{Verification Without the Board}
+\label{sec:verify}
+
+The final check is to run the output on a Corvette board. Without one, a P-extension program cannot run
+anywhere: upstream Spike has dropped the draft P-extension, and GNU \code{as} does not accept
+\code{ukadd8}. \code{make test-bonus} (script \file{bonus/tests/run.sh}) therefore checks each test program in
+three separate ways.
+
+\subsection{Reference results}
+
+A C reference implementation of the four instructions, written from the RISC-V P-extension specification:
+
+\snippet{../tests/pext_ref.h}{static inline uint32_t pext_lanes}{@end}
+
+The host gcc compiles the test program with each \code{__rv__*} name mapped to this implementation and runs it
+on 12 input pairs. The output is the expected result. The inputs include the specification's examples and,
+for each byte lane, the saturation and equality edge cases:
+
+\snippet{../tests/main.c}{static const uint32_t inputs}{@end}
+
+\subsection{Running the generated code}
+
+\code{./codegen --rv32 --pext-emulate} generates code that calls \code{__pext_<op>(rs1, rs2)} in place of each
+P-extension instruction, with the operands in the same order as the real instruction
+(\code{a0} = \code{rs1}, \code{a1} = \code{rs2}). This is the \code{pext_emulate} branch of \code{gen_intrinsic}
+shown above. The emulation functions call the same reference implementation:
+
+\snippet{../tests/pext_emulate.c}{uint32_t __pext_ukadd8}{+4}
+
+The program is linked with the same \file{main.c}, run on RV32 Spike, and its output must equal the
+reference results exactly. Everything except the four instructions --- the RV32 frame, argument passing,
+operand order, unsigned operations --- is executed for real.
+
+\subsection{Checking the real output}
+
+\code{./codegen --rv32} (without emulation) produces the \file{codegen.S} that goes onto the board. The script
+checks it statically:
+
+\snippet[language=bash]{../tests/run.sh}{# 3. Real output}{not valid RV32 assembly}
+
+\begin{itemize}
+  \item the number of P-extension instructions equals the number of emulated calls in step 2, so no
+        intrinsic is lost or duplicated;
+  \item no call to an \code{__rv__} function remains;
+  \item with the P-extension instructions replaced by \code{nop}, the rest assembles as valid RV32 code.
+\end{itemize}
+
+\subsection{Test programs}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+Test & Content \\
+\midrule
+\file{0.c} & the TA's example \\
+\file{1.c} & three intrinsics chained through local variables \\
+\file{2.c} & non-commutative operations, to check operand order \\
+\file{3.c} & nested intrinsic calls \\
+\file{4.c} & unsigned comparison, division and right shift mixed with an intrinsic; \textbf{CRLF line endings}, like the TA's original \file{0.c} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\file{.gitattributes} sets \code{-text} on \file{4.c} so that git never converts its line endings. Without
+it, git (configured with \code{core.autocrlf=input}) would store the file with LF endings and the CRLF case
+would silently disappear; this is what happened to the TA's \file{0.c}.
+
+\subsection{Testing the tests}
+
+To make sure the checks can actually fail, I edited the generated assembly by hand and confirmed that each
+change makes the suite fail:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+Mutation & Caught by \\
+\midrule
+swap the operands of an intrinsic & \file{1.c}, \file{2.c}, \file{3.c} \\
+\code{sltu} $\rightarrow$ \code{slt} & \file{4.c} \\
+\code{divu} $\rightarrow$ \code{div} & \file{4.c} \\
+\code{srl} $\rightarrow$ \code{sra} & \file{4.c} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The first versions of two tests did not catch their mutation. \file{2.c} computed an expression that happened
+to be symmetric, so swapping operands gave the same result; in \file{4.c} the difference between signed and
+unsigned comparison was absorbed by a later division. Both were rewritten until every mutation was caught.
+
+\section{Remaining Work}
+
+\begin{itemize}
+  \item \textbf{Hardware semantics.} The reference implementation follows the published P-extension
+        specification; whether it matches the Andes hardware exactly can only be confirmed on the board.
+  \item \textbf{Andes assembler.} The output uses the same syntax as the TA's sample (\code{ukadd8 a5, a4, a5}),
+        but it has not yet been assembled with the Andes toolchain.
+\end{itemize}
+
+To run on a board:
+
+\begin{enumerate}
+  \item Generate the assembly with \code{./codegen --rv32 < testcase.c}.
+  \item Install the Corvette board package as described in \file{bonus/spec/Arduino_Env_Guide_Corvette-F1_T1.pdf},
+        and add \code{-mext-dsp} to \file{platform.txt}.
+  \item Put \file{HW3_Bonus.ino} and the generated \file{codegen.S} in the same sketch folder and upload it.
+  \item Open the Serial Monitor (no line ending, 9600 baud) and enter pairs such as \code{65280, 65283}.
+        The sketch should print ``The results are equal.''
+\end{enumerate}
+
+\end{document}

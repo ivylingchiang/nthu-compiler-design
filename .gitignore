@@ -1,0 +1,28 @@
+# Flex / Yacc output
+lex.yy.c
+y.tab.c
+y.tab.h
+y.output
+*.tab.c
+*.tab.h
+
+# Build output
+scanner
+parser
+codegen
+*.o
+*.out
+a.out
+
+# HW3 generated assembly (per-test output); the sample projects' codegen.S is tracked
+/hw3-codegen/build/
+/hw3-codegen/tests/out/
+
+# Test output
+*.actual
+*.diff
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,9 @@
+Arduino delay(0);
+Arduino delay(0);
+Arduino delay(1);
+Arduino delay(0);
+Arduino delay(1);
+Arduino delay(1);
+Arduino delay(0);
+Arduino delay(2);
+Arduino digitalWrite(2, 1);

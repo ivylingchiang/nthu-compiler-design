@@ -1,0 +1,8 @@
+Arduino delay(123456);
+Arduino delay(427710);
+Arduino delay(3628800);
+Arduino delay(40);
+Arduino delay(3);
+Arduino delay(77);
+Arduino delay(4);
+Arduino digitalWrite(26, 1);

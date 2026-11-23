@@ -1,0 +1,336 @@
+\documentclass[12pt]{article}
+\usepackage{report}
+
+\begin{document}
+
+\reporttitle{CS340400 Compiler Design - Homework 2 Implementation Report}
+
+\section{Overview}
+
+This assignment builds a parser for a subset of C with flex and yacc. The parser checks the grammar
+of the input and, if the input is valid, prints its syntax tree in an XML-like form that marks every
+declaration, expression and statement.
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Files & \file{scanner.l}, \file{parser.y}, \file{makefile} \\
+Grammar & byacc: \textbf{0 shift/reduce and 0 reduce/reduce conflicts} \\
+Build & GNU gcc 13.3, \textbf{0 warnings} (also with \code{-Wall}) \\
+Tests & 9 cases in \file{tests/}, one per grading item --- \textbf{9/9 pass}; the 9 public HW3 test
+        programs also parse \\
+Usage & \code{make parser && ./parser < input.c}; \code{make test} runs all cases \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Most of the difficulty in this assignment is not the grammar itself but the interaction between flex
+and yacc: semantic-value lifetimes, token naming, output buffers and conflicts.
+Section~\ref{sec:diff} summarises the pitfalls in these areas and how this parser avoids each one.
+
+\section{Output Format}
+
+The specification defines six tags:
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Tag & Encloses \\
+\midrule
+\code{<scalar_decl>} & a variable declaration without arrays, e.g.\ \code{int a, *b;} \\
+\code{<array_decl>} & a variable declaration with at least one array, e.g.\ \code{int a[3];} \\
+\code{<func_decl>} & a function declaration (prototype only) \\
+\code{<func_def>} & a function definition (with a body) \\
+\code{<expr>} & every expression, including every sub-expression \\
+\code{<stmt>} & every statement \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All whitespace is removed except inside character and string literals, and the output contains no
+newline. For example, \code{int b = 1 - 2 - 3;} becomes:
+
+\begin{lstlisting}[language={},numbers=none]
+<scalar_decl>intb=<expr><expr><expr>1</expr>-<expr>2</expr></expr>-<expr>3</expr></expr>;</scalar_decl>
+\end{lstlisting}
+
+The nesting shows left associativity: \code{1 - 2} is grouped first, so it is the inner \code{<expr>}.
+
+\section{Structure}
+
+\begin{center}
+\begin{tikzpicture}[
+    box/.style={draw=headblue, rounded corners=2pt, fill=codebg, minimum height=8mm,
+                inner xsep=6pt, font=\small\headfont},
+    lab/.style={font=\scriptsize\headfont, text=gray, align=center},
+    >={Stealth[length=2mm]}]
+  \node[box] (src) {source code};
+  \node[box, right=14mm of src] (scan) {\file{scanner.l}};
+  \node[box, right=22mm of scan] (parse) {\file{parser.y}};
+  \node[box, right=16mm of parse] (out) {\code{printf}};
+  \draw[->] (src) -- (scan);
+  \draw[->] (scan) -- node[lab, above] {token +\\string value} (parse);
+  \draw[->] (parse) -- node[lab, above] {output\\string} (out);
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}
+  \item The \textbf{scanner} is adapted from HW1. It no longer prints anything; it returns tokens to the
+        parser, and the semantic value of every token is a string (\code{yylval.s}).
+  \item In the \textbf{parser}, the semantic value of every nonterminal is the finished output for its
+        subtree. Each reduction concatenates the children's strings with the tags and passes the result
+        up. When the whole input reduces to \code{program}, the result is printed once.
+  \item On a syntax error, \code{yyerror} prints the line number and exits with status 1, so no partial
+        output is ever printed.
+\end{itemize}
+
+The output is the source text plus tags, minus whitespace. Each rule only has to decide where its tags
+go, so a string is the simplest possible semantic value and no separate syntax tree is needed. HW3,
+which generates assembly, switches to a real AST.
+
+\section{Scanner}
+
+Compared with HW1, the scanner changes as follows:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lLL@{}}
+\toprule
+Item & HW1 & HW2 \\
+\midrule
+Output & prints tokens and lines & prints nothing; returns tokens \\
+Semantic value & --- & \code{tok()} copies \code{yytext} with \code{strdup} \\
+One-character operators & \code{#op}, \code{#punc} & \code{return yytext[0]}; the grammar writes \code{'('}, \code{'+'} \\
+Numbers & printed as written & normalised here: integers with \code{\%d}, floats with \code{\%f} (\code{1.5} becomes \code{1.500000}) \\
+\code{NULL} & \code{#macro} & returned as \code{INT_LIT} with value \code{"0"} \\
+Signs & part of the number & \emph{not} part of it: \code{-1} is \code{'-'} then \code{1}; the parser decides unary vs.\ binary \\
+Pragmas, comments, spaces & part of the printed line & skipped; only \code{lineno} is kept for error messages \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{The \code{strdup} is required.} \code{yytext} points into flex's internal buffer and is overwritten
+by the next call to \code{yylex()}. The parser uses a token's value only when it reduces, by which time
+\code{yytext} may already hold a later token. Storing \code{yytext} itself would make values such as
+character literals come out wrong.
+
+\snippet[language=flex]{../scanner.l}{static int tok(}{@end}
+
+\textbf{One-character tokens are returned as themselves.} Giving every symbol a name invites mix-ups:
+names such as \code{L_BRACKET} and \code{L_PARENTHESIS} are easy to attach to the wrong character, and
+then \code{(expr)} is printed as \code{\{expr\}}. Returning the character means that
+\code{'('} in the grammar is literally \code{(}:
+
+\snippet[language=flex]{../scanner.l}{return yytext[0]}{+1}
+
+\section{Parser}
+
+\subsection{String concatenation: \texttt{J(...)}}
+
+\snippet[language=yacc]{../parser.y}{static char *J(}{@end}
+\snippet[language=yacc]{../parser.y}{define EXPR(}{+1}
+
+\code{J} walks its arguments twice: once to add up the length, and once to copy into a buffer of exactly
+that size. The usual shortcut, \code{char buffer[1024]} with \code{sprintf} in every action, has two problems:
+each nesting level adds 13 characters of tags, so deep expressions overflow 1024 bytes, and
+\code{$$ = buffer} returns a pointer to a local array that is gone once the action returns.
+
+The macros \code{EXPR(...)} and \code{STMT(...)} make each action read almost like the output format,
+e.g.\ \code{EXPR($1, "+", $3)}.
+
+\note{Memory is never freed. The parser exits right after printing and the input is small, so
+skipping \code{free} keeps the code simple.}
+
+\subsection{Declarations}
+
+Every C declaration starts with a type, and only the token after the identifier tells which kind it is:
+
+\begin{lstlisting}[numbers=none]
+int a;              // scalar_decl
+int a[3];           // array_decl
+int f(int x);       // func_decl
+int f(int x) { }    // func_def
+\end{lstlisting}
+
+All declarations therefore share one \code{type_spec}, and the parser chooses after the identifier.
+LALR(1) needs only the single token after \code{ID} to decide:
+
+\snippetafter{start program}
+\snippet[language=yacc]{../parser.y}{^ext_decl}{2@rule}
+
+If \code{ID} is followed by \code{(}, the parser takes \code{func_head}; if it is followed by \code{;},
+\code{,}, \code{=} or \code{[}, it takes \code{declarator_list}. Whether a function is declared or defined
+depends on whether \code{)} is followed by \code{;} or \code{\{}.
+
+One declaration may have several declarators (\code{int a, b[3];}), and if any of them is an array the
+whole declaration is an \code{<array_decl>}. The semantic value of a declarator is therefore a struct
+holding the string and an \code{is_array} flag, and the flags are OR-ed when declarators are combined:
+
+\snippet[language=yacc]{../parser.y}{union}{@end}
+\snippetafter{start program}
+\snippet[language=yacc]{../parser.y}{^declarator_list}{@rule}
+
+Every kind of declaration uses the same \code{type_spec}. Separate type nonterminals for scalars
+(\code{types}) and for arrays and functions (\code{type}) would overlap and cause conflicts, and would
+make \code{const} arrays and \code{const} parameters hard to parse.
+
+\subsection{Types}
+
+The specification allows combinations such as \code{[const] [signed|unsigned] [long long|long|short] int},
+with most parts optional. The grammar splits them into layers, each handling one dimension:
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Nonterminal & Alternatives \\
+\midrule
+\code{type_spec} & \code{base_type} \textbar\ \code{const base_type} \\
+\code{base_type} & \code{sign} \textbar\ \code{sign int_core} \textbar\ \code{int_core} \textbar\ \code{float} \textbar\ \code{double} \textbar\ \code{void} \\
+\code{sign} & \code{signed} \textbar\ \code{unsigned} \\
+\code{int_core} & \code{size} \textbar\ \code{size int} \textbar\ \code{int} \textbar\ \code{char} \\
+\code{size} & \code{short} \textbar\ \code{long} \textbar\ \code{long long} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Because whitespace is dropped, \code{unsigned long long int} is printed as \code{unsignedlonglongint}.
+
+\subsection{Expressions and precedence}
+
+All expressions live in a single \code{expr} rule. Precedence and associativity come from yacc
+declarations, ordered after C's operator precedence table (lowest first):
+
+\snippet[language=yacc]{../parser.y}{right '='}{INC DEC}
+
+When yacc meets a shift/reduce conflict, it compares the precedence of the rule with that of the
+lookahead token: it shifts if the token is higher, reduces if it is lower, and uses associativity if
+they are equal. After \code{a - b}, for example, a lookahead \code{*} has higher precedence than \code{-},
+so the parser shifts and the multiplication is grouped first.
+
+\code{-}, \code{*} and \code{&} are both unary and binary operators, but a token has only one
+precedence. The unary rules therefore use \code{\%prec UNARY} to take the higher precedence:
+
+\snippet[language=yacc]{../parser.y}{INC expr}{+10}
+
+So \code{-a * b} parses as \code{(-a) * b}. Postfix \code{++} and \code{--} rank above \code{UNARY}, so
+\code{-a++} is \code{-(a++)}.
+
+\subsubsection{Avoiding conflicts}
+
+Three places commonly produce conflicts; the grammar avoids each one by construction:
+
+\begin{enumerate}
+  \item \textbf{Calls and subscripts attach only to an \code{ID}} (\code{ID '(' args ')'} and \code{ID dims}),
+        not to an arbitrary \code{expr}. A \code{(} or \code{[} can then never follow a complete expression,
+        so it cannot clash with a parenthesised expression. The specification never needs \code{f()()} or
+        \code{(p)[0]}, so nothing is lost.
+  \item \textbf{A cast and a parenthesised expression} both begin with \code{(}, but the next token differs: a
+        type keyword for a cast, and the start of an expression otherwise. One token of lookahead is enough.
+  \item \textbf{The body of \code{if} must be a compound statement} (as the specification requires), so the
+        dangling-else case \code{if (a) if (b) x; else y;} cannot occur.
+\end{enumerate}
+
+\subsubsection{Output example}
+
+\code{int d = f(1, a) + g();} prints as:
+
+\begin{lstlisting}[language={},numbers=none]
+<scalar_decl>intd=<expr><expr>f(<expr>1</expr>,<expr>a</expr>)</expr>+<expr>g()</expr></expr>;</scalar_decl>
+\end{lstlisting}
+
+The function name is not wrapped on its own: the whole call is one \code{<expr>}, and each argument is
+its own \code{<expr>}. Subscripts work the same way; \code{arr[1][i]} prints as:
+
+\begin{lstlisting}[language={},numbers=none]
+<expr>arr[<expr>1</expr>][<expr>i</expr>]</expr>
+\end{lstlisting}
+
+\subsection{Statements}
+
+\snippet[language=yacc]{../parser.y}{^stmt}{@rule}
+
+\begin{itemize}
+  \item Each of the three parts of \code{for} may be empty, using \code{expr_opt} (an empty string or an
+        expression), so \code{for(;;)} parses.
+  \item Inside a compound statement, declarations and statements may be mixed (\code{items} is built from
+        \code{stmt} and \code{local_decl}).
+  \item A compound statement is not wrapped in \code{<stmt>} by itself. Only when it appears as a statement,
+        such as the body of \code{while} or a stand-alone block, does \code{stmt : compound} add the tag.
+\end{itemize}
+
+The \code{switch} statement:
+
+\snippetafter{start program}
+\snippet[language=yacc]{../parser.y}{^switch_clauses}{2@rule}
+
+Each clause is \code{case expr:} or \code{default:} followed by zero or more statements. Two rules
+are enough; listing every combination of case, default and statement list separately produces
+overlapping rules and conflicts.
+
+\section{Testing}
+
+\code{make test} runs \file{./parser} on every \file{tests/*.c} and compares the output with the matching
+\file{.expected} file.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lP{4.8cm}L@{}}
+\toprule
+Test & Grading item (points) & Focus \\
+\midrule
+\file{01_scalar_decl} & Scalar declarations without initialization (10) & several declarators, pointers, \code{unsigned long long int}, a lone \code{const;} \\
+\file{02_array_decl} & Array declarations without initialization (10) & multi-dimensional arrays, several arrays per line, \code{const} arrays \\
+\file{03_func_decl} & Function declarations (10) & no parameters, pointer parameters, pointer return type \\
+\file{04_expr_unary} & Expressions: \code{++}/\code{--}, unary, calls, subscripts, casts (10) & \code{x++ + --y}, \code{f(1, a) + g()}, \code{(int *)p} \\
+\file{05_expr_arith} & Expressions: arithmetic, comparison, logical (10) & precedence and left associativity \\
+\file{06_expr_all} & Expressions: all operations (10) & bitwise operators, chained assignment, float, char, string, \code{NULL} \\
+\file{07_decl_init} & Full variable declarations (10) & nested initialisers \code{\{\{0,1,2\},\{3,4,5\}\}}, \code{*y = &x} \\
+\file{08_stmt} & Statements (20) & every statement, \code{for(;;)}, empty \code{default:}, empty \code{switch}, block comments \\
+\file{09_func_def} & Function definitions (10) & a function returning a pointer; declarations mixed with definitions \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Pitfalls and How They Are Avoided}
+\label{sec:diff}
+
+The table lists the pitfalls with the largest effect and how this implementation avoids them.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lLLL@{}}
+\toprule
+Where & Pitfall & Effect & Handling \\
+\midrule
+scanner & No rule for \code{\n}; flex echoes newlines by default & Extra newlines in every output & Newlines only increment \code{lineno} \\
+scanner & \code{/*} does not enter a comment state & Comment text parsed as tokens & HW1's \code{\%x COMMENT} \\
+scanner & \code{FLOAT} includes the sign & \code{a-1.5} split as \code{a}, \code{-1.5}: syntax error & Signs left to the parser \\
+scanner & Semantic values not copied from \code{yytext} & Wrong character literals & \code{tok()} copies every value \\
+parser & Named tokens for \code{(} and \code{\{} mixed up & \code{(expr)} printed as \code{\{expr\}} & One-character tokens are the characters \\
+parser & Returning a stack \code{buffer}; fixed 1024 bytes & Garbage output, overflow on nesting & \code{J(...)} allocates exactly \\
+parser & Declarations using both \code{type} and \code{types} & Conflicts; \code{const} arrays and parameters fail & One \code{type_spec} \\
+parser & Overlapping \code{switch} rules & Conflicts; \code{case} followed by a statement fails & \code{switch_clauses} + \code{switch_clause} \\
+parser & \code{\%define parse.error verbose} is Bison-only & Fails under byacc & POSIX yacc features only \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Assumptions}
+
+The specification says to ``follow \code{golden_parser} in the case of ambiguity'', but the reference
+parser is no longer available. The following formats come from the specification's examples and the
+most common convention, and could not be checked against it:
+
+\begin{center}
+\begin{tabularx}{0.8\linewidth}{@{}lL@{}}
+\toprule
+Construct & Output \\
+\midrule
+\code{(a)} & \code{<expr>(<expr>a</expr>)</expr>} \\
+\code{f(1)} & \code{<expr>f(<expr>1</expr>)</expr>} \\
+\code{a[1]} & \code{<expr>a[<expr>1</expr>]</expr>} \\
+\code{long long} & \code{longlong} \\
+\code{'a'} & \code{<expr>'a'</expr>}, quotes kept \\
+\code{1.5} & \code{<expr>1.500000</expr>}, normalised with \code{\%f} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\end{document}

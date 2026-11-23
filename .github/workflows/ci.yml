@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build and test (HW1, HW2, HW3, Bonus)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Toolchain image: flex, byacc, gcc, xPack RISC-V GCC, Spike, pk (RV64 + RV32).
+      # Spike is built from source, so the first run takes a while; later runs use the layer cache.
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: dev/docker
+          target: toolchain
+          tags: compiler-toolchain:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: HW1 scanner
+        run: docker run --rm -v "$PWD":/work -w /work compiler-toolchain:ci make -C hw1-scanner test
+
+      - name: HW2 parser
+        run: docker run --rm -v "$PWD":/work -w /work compiler-toolchain:ci make -C hw2-parser test
+
+      - name: HW3 codegen (RV64, RV32) and Bonus
+        run: docker run --rm -v "$PWD":/work -w /work compiler-toolchain:ci make -C hw3-codegen test-all

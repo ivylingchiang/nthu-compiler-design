@@ -1,0 +1,1 @@
+<scalar_decl>intg;</scalar_decl><func_def>int*id(int*p){<stmt>return<expr>p</expr>;</stmt>}</func_def><func_decl>voidcodegen();</func_decl><func_def>voidcodegen(){<stmt><expr>digitalWrite(<expr>26</expr>,<expr>HIGH</expr>)</expr>;</stmt><stmt><expr>delay(<expr>1000</expr>)</expr>;</stmt>}</func_def>

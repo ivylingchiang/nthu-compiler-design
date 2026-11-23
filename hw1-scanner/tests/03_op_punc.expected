@@ -1,0 +1,32 @@
+#id:a
+#op:+
+#id:b
+#op:++
+#op:--
+#op:<=
+#op:>=
+#op:==
+#op:!=
+#op:&&
+#op:||
+#op:!
+#op:&
+#op:|
+#op:<
+#op:>
+#op:=
+#op:*
+#op:/
+#op:%
+1:a+b ++ -- <= >= == != && || ! & | < > = * / %
+#punc::
+#punc:;
+#punc:,
+#punc:.
+#punc:[
+#punc:]
+#punc:(
+#punc:)
+#punc:{
+#punc:}
+2:: ; , . [ ] ( ) { }

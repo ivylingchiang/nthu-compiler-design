@@ -1,0 +1,1 @@
+<array_decl>floata[<expr>1</expr>],b[<expr><expr>1</expr>+<expr>1</expr></expr>][<expr>3</expr>]={{<expr>0</expr>,<expr>1</expr>,<expr>2</expr>},{<expr>3</expr>,<expr>4</expr>,<expr>5</expr>}};</array_decl><scalar_decl>intx=<expr>1</expr>,*y=<expr>&<expr>x</expr></expr>,z;</scalar_decl>

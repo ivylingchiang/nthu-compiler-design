@@ -1,0 +1,1 @@
+<array_decl>inta[<expr>1</expr>][<expr>3</expr>];</array_decl><array_decl>chars[<expr>10</expr>],t[<expr>2</expr>];</array_decl><array_decl>constintk[<expr>4</expr>];</array_decl>

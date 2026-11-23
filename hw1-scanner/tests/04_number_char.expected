@@ -1,0 +1,28 @@
+#integer:0
+#integer:-0
+#integer:1
+#integer:+123
+#integer:45
+#integer:-2131
+#op:-
+#integer:0
+1:0 -0 1 +123 45 -2131 - 0
+#float:0.0
+#float:0.1234
+#float:123.456
+#float:-0.0
+#float:+1.5
+#float:.5
+#float:5.
+#op:-
+#float:0.
+#float:-0.
+2:0.0 0.1234 123.456 -0.0 +1.5 .5 5. - 0. -0.
+#char:'a'
+#char:'\t'
+#char:'\0'
+#char:'\''
+#char:'\\'
+#char:'\x41'
+#char:'"'
+3:'a' '\t' '\0' '\'' '\\' '\x41' '"'

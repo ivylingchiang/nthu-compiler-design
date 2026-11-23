@@ -1,0 +1,18 @@
+1:#pragma source on
+#key:char
+#id:a
+#op:=
+#char:'i'
+#punc:;
+2:char a = 'i';
+#key:int
+#id:b
+#punc:;
+5:#pragma source on
+6:#pragma token off
+7:int c;
+8:#pragma token on
+#key:int
+#id:d
+#punc:;
+9:int d;

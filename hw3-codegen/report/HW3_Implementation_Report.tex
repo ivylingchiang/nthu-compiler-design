@@ -1,0 +1,559 @@
+\documentclass[12pt]{article}
+\usepackage{report}
+
+\begin{document}
+
+\reporttitle{CS340400 Compiler Design - Homework 3 Implementation Report}
+
+\section{Overview}
+
+This assignment extends the HW2 parser into a compiler: it reads a subset of C and writes RISC-V
+assembly to \file{codegen.S}. For testing, the TA's \file{main.c} calls the generated \code{codegen()},
+which in turn calls the Arduino functions \code{digitalWrite()} and \code{delay()}; running on the Spike
+simulator prints a log of those calls.
+
+\begin{center}
+\begin{tabularx}{0.95\linewidth}{@{}lL@{}}
+\toprule
+Files & \file{scanner.l}, \file{parser.y}, \file{makefile} \\
+Grammar & byacc: \textbf{0 conflicts} \\
+Build & GNU gcc 13.3, \textbf{0 warnings} (also with \code{-Wall -Wextra}) \\
+Public tests & the TA's 9 test programs on Spike --- \textbf{9/9 pass} \\
+Own tests & 6 programs in \file{tests/extra/} standing in for the hidden tests --- \textbf{6/6 pass} \\
+RV32 & the same compiler with \code{--rv32}, all 15 programs on RV32 Spike --- \textbf{15/15 pass} \\
+Usage & \code{make codegen && ./codegen < input.c}; the output goes to \file{codegen.S} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The design goals are a clear separation between parsing and code generation, correct recursive
+functions, and a proper stack frame that follows the RISC-V calling convention.
+
+\subsection{Constraints from the specification}
+
+\begin{itemize}
+  \item Only \file{scanner.l}, \file{parser.y} and \file{makefile} are submitted, so the AST, the symbol
+        table and the code generator all live in \file{parser.y}.
+  \item \textbf{No static optimisation}: no constant folding, constant propagation or dead-code elimination.
+  \item RV64: 8-byte memory accesses with \code{ld} and \code{sd}.
+  \item Calls follow the RISC-V calling convention: arguments in \code{a0}--\code{a7}, the result in \code{a0}.
+  \item \code{HIGH} equals 1 and \code{LOW} equals 0.
+\end{itemize}
+
+\section{Architecture}
+
+\begin{center}
+\begin{tikzpicture}[
+    box/.style={draw=headblue, rounded corners=2pt, fill=codebg, minimum height=8mm,
+                inner xsep=5pt, font=\small\headfont, align=center},
+    lab/.style={font=\scriptsize\headfont, text=gray, align=center},
+    >={Stealth[length=2mm]}]
+  \node[box] (scan) {\file{scanner.l}};
+  \node[box, right=9mm of scan] (gram) {grammar\\[-2pt]{\scriptsize same as HW2}};
+  \node[box, right=9mm of gram] (ast) {AST};
+  \node[box, right=9mm of ast] (gen) {codegen walk\\[-2pt]{\scriptsize + symbol table}};
+  \node[box, right=9mm of gen] (out) {\file{codegen.S}};
+  \draw[->] (scan) -- (gram);
+  \draw[->] (gram) -- (ast);
+  \draw[->] (ast) -- (gen);
+  \draw[->] (gen) -- (out);
+  \draw[headblue, dashed, rounded corners=3pt]
+     ($(gram.north west)+(-2mm,5mm)$) rectangle ($(gen.south east)+(2mm,-3mm)$);
+  \node[lab, anchor=south] at ($(ast.north)+(0,5mm)$) {\file{parser.y}};
+\end{tikzpicture}
+\end{center}
+
+\file{parser.y} is divided into five numbered blocks, each introduced by a banner comment:
+
+\begin{center}
+\begin{tabularx}{0.95\linewidth}{@{}lL@{}}
+\toprule
+Block & Contents \\
+\midrule
+{[1]} AST & node kinds, the \code{Node} struct, constructors (in the prologue, used by the actions) \\
+{[2]} Grammar & identical to HW2; the actions build AST nodes instead of strings \\
+{[3]} Symbol table & a scope stack stored in an array \\
+{[4]} Code generation & expressions, statements, functions, globals \\
+{[5]} \code{main} & command-line options, target selection, opening \file{codegen.S} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Why build an AST first}
+
+The specification's hints and the lecture slides emit assembly directly from the yacc actions with
+\code{fprintf}. I build an AST first and generate code in a separate walk after parsing, because:
+
+\begin{enumerate}
+  \item \textbf{The frame size must be known up front.} The prologue allocates the whole stack frame at
+        once, but the number of locals is known only after the whole body is parsed. With an AST, the
+        generator counts them first (\code{count_slots}) and then emits the prologue.
+  \item \textbf{Labels are easier to manage.} \code{break} and \code{continue} jump to labels outside the
+        loop; a walk over the AST tracks the enclosing loops with a simple stack.
+  \item \textbf{Pointer arithmetic needs types.} \code{p + 1} must be scaled when \code{p} is a pointer; the
+        walk can consult the symbol table to decide.
+  \item \textbf{Switching targets is cheap.} RV32 and RV64 differ in a handful of parameters, which the walk
+        swaps without touching the grammar.
+\end{enumerate}
+
+\section{Scanner}
+
+The scanner is HW2's with three extra rules. Two of them turn the Arduino constants into integer
+literals, so neither the parser nor the generator needs to know about them:
+
+\snippet[language=flex]{../scanner.l}{"HIGH"}{+2}
+
+The third rule, for \code{uint32_t}, belongs to the Bonus and is described in the Bonus report.
+
+\section{AST}
+
+\subsection{The node structure}
+
+\snippet[language=yacc]{../parser.y}{typedef struct Node}{@end}
+
+Every node uses the same struct, and \code{kind} says what it is. A node has at most four children
+(\code{a}--\code{d}); \code{for} uses all four: initialiser, condition, step and body. Lists of
+parameters, arguments or statements are chained through \code{next}. \code{line} records the line number
+for error messages.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}llL@{}}
+\toprule
+Group & Kind & Fields used \\
+\midrule
+Expression & \code{E_NUM} & \code{ival}: integer and character literals (\code{'a'} becomes 97 while building the AST) \\
+ & \code{E_VAR} & \code{name} \\
+ & \code{E_BIN}, \code{E_ASSIGN} & \code{op}, \code{a} (left), \code{b} (right) \\
+ & \code{E_PRE}, \code{E_POST}, \code{E_UNARY} & \code{op}, \code{a} \\
+ & \code{E_DEREF}, \code{E_ADDR}, \code{E_CAST} & \code{a} (\code{E_CAST} also sets \code{is_ptr}, \code{is_unsigned}) \\
+ & \code{E_CALL}, \code{E_INDEX} & \code{name}, \code{a} (arguments / index) \\
+Statement & \code{S_IF} & \code{a} (condition), \code{b} (then), \code{c} (else, may be NULL) \\
+ & \code{S_WHILE}, \code{S_DO} & condition and body \\
+ & \code{S_FOR} & \code{a}, \code{b}, \code{c}, \code{d} \\
+ & \code{S_SWITCH}, \code{S_CASE} & a \code{S_CASE} with \code{a == NULL} is \code{default} \\
+ & \code{S_BLOCK}, \code{S_DECLS} & \code{a} (statement list, declarator list) \\
+Declaration & \code{D_VAR} & \code{name}, \code{is_ptr}, \code{a} (array dimensions), \code{b} (initialiser) \\
+ & \code{D_FUNC} & \code{name}, \code{is_ptr}, \code{a} (parameters), \code{b} (body, NULL for a prototype) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Grammar actions}
+
+The grammar is the same as HW2's; only the actions change, from building strings to building nodes:
+
+\snippetafter{start program}
+\snippet[language=yacc]{../parser.y}{^expr}{+3}
+\snippet[language=yacc]{../parser.y}{'(' expr ')'}{+3}
+
+Parentheses only affect the shape of the tree, so \code{'(' expr ')'} simply returns the inner node.
+
+Types are simplified as well. The generator does not distinguish \code{int}, \code{char} and \code{long}:
+every integer and pointer occupies one machine word. The semantic value of \code{type_spec} is therefore no
+longer a string but a single flag, whether the type is unsigned (used by the Bonus). Whether a variable is
+a pointer comes from the \code{*} in its declarator and is stored in \code{is_ptr}.
+
+\section{Symbol Table}
+
+\snippetafter{SYM_LOCAL, SYM_GLOBAL}
+\snippet[language=yacc]{../parser.y}{typedef struct}{@end}
+\snippet[language=yacc]{../parser.y}{static void scope_push}{@end}
+\snippet[language=yacc]{../parser.y}{static Sym *sym_lookup}{@end}
+
+The symbol table is an array used as a stack:
+
+\begin{itemize}
+  \item Every symbol records the scope depth it was declared at. Entering \code{\{ \}} increments
+        \code{depth}; leaving it pops every symbol of that depth off the top.
+  \item Lookup scans \emph{from the top down}, so the first match is the innermost declaration and
+        shadowing works without extra effort.
+  \item There are three kinds of symbols: \code{SYM_LOCAL} (locals and parameters, with an offset from
+        \code{s0}), \code{SYM_GLOBAL} (addressed with \code{la}) and \code{SYM_FUNC} (records whether the
+        function returns a pointer).
+\end{itemize}
+
+Because the generator walks the AST in order and adds a symbol when it reaches the declaration, a name
+is visible from its declaration onwards, as in C.
+
+\section{Stack Frame}
+
+\subsection{Layout}
+
+\begin{center}
+\begin{tikzpicture}[
+    cell/.style={draw=headblue, fill=codebg, minimum width=48mm, minimum height=6.5mm,
+                 font=\small\headfont, inner sep=0pt},
+    tmp/.style={cell, fill=white, dashed},
+    off/.style={font=\scriptsize\ttfamily, text=gray, anchor=west},
+    note/.style={font=\scriptsize\headfont, text=gray, anchor=east, align=right},
+    >={Stealth[length=2mm]}]
+  \node[cell] (ra) {\code{ra}};
+  \node[cell, below=0pt of ra] (s0) {old \code{s0}};
+  \node[cell, below=0pt of s0] (p1) {parameter 1 (from \code{a0})};
+  \node[cell, below=0pt of p1] (p2) {parameter 2 (from \code{a1})};
+  \node[cell, below=0pt of p2, minimum height=9mm] (loc) {locals, one slot per declaration};
+  \node[cell, below=0pt of loc, minimum height=9mm] (arr) {array \code{arr[n]}};
+  \node[tmp, below=0pt of arr, minimum height=9mm] (t) {temporaries (push/pop)};
+  \node[off] at ($(ra.east)+(2mm,0)$) {s0 - 8};
+  \node[off] at ($(s0.east)+(2mm,0)$) {s0 - 16};
+  \node[off] at ($(p1.east)+(2mm,0)$) {s0 - 24};
+  \node[off] at ($(p2.east)+(2mm,0)$) {s0 - 32};
+  \node[off] at ($(arr.east)+(2mm,-2.2mm)$) {arr[0]: lowest address};
+  \draw[->, gray] ($(ra.north west)+(-14mm,0)$) node[note, left] {\code{s0} = caller's \code{sp}} -- (ra.north west);
+  \draw[->, gray] ($(arr.south west)+(-14mm,0)$) node[note, left] {\code{sp} = \code{s0} - frame\\(16-byte aligned)} -- (arr.south west);
+  \draw[->, gray] ($(ra.north east)+(44mm,0)$) -- node[font=\scriptsize\headfont, right, text=gray] {lower addresses} ($(t.south east)+(44mm,0)$);
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{Every integer and pointer takes one word} (8 bytes on RV64). Array elements are one word
+        apart and pointer arithmetic scales by one word, so no per-type sizes are needed.
+  \item \textbf{Every declaration gets its own slot, and slots are never reused}, even for variables in
+        blocks that are never live at the same time. The frame is larger, but every offset is fixed when
+        the code is generated, which leaves little room for mistakes.
+  \item \textbf{Parameters are stored in slots too.} Right after the prologue, \code{a0}--\code{a7} are saved
+        to the frame. Parameters and locals are then handled identically, and \code{&param} has an address:
+        the public test Function/0 calls \code{modulo(&a, &b)} on \code{gcd}'s parameters.
+  \item \textbf{Element 0 of an array is at the lowest address}, so \code{arr + i} moves towards higher
+        addresses as C requires.
+\end{itemize}
+
+\subsection{Sizing the frame before emitting it}
+
+\snippet[language=yacc]{../parser.y}{static int count_slots}{@end}
+
+\code{count_slots} walks the function body and adds up the slots its declarations need: \code{n} for an
+array, 1 for anything else, plus one per \code{switch} to hold the value being matched. The frame is then
+two slots for \code{ra} and the old \code{s0}, plus parameters and locals, rounded up to a multiple of 16
+because the ABI keeps \code{sp} 16-byte aligned:
+
+\snippet[language=yacc]{../parser.y}{int frame = 2 * W}{+1}
+
+\subsection{Prologue and epilogue}
+
+\snippet[language=yacc]{../parser.y}{static void gen_function}{@end}
+
+For \code{int add(int a, int b) \{ int c = a + b; return c; \}} the generator produces:
+
+\begin{lstlisting}[language=riscv,title={\codetitle{codegen.S (RV64), comments added}}]
+.global add
+add:
+  addi sp, sp, -48          # prologue: 2 + 2 + 1 = 5 slots = 40 bytes, rounded up to 48
+  sd ra, 40(sp)
+  sd s0, 32(sp)
+  addi s0, sp, 48
+  sd a0, -24(s0)            # parameters go to their own slots
+  sd a1, -32(s0)
+  addi t0, s0, -24          # load a
+  ld t0, 0(t0)
+  addi sp, sp, -16          # push a
+  sd t0, 0(sp)
+  addi t0, s0, -32          # load b
+  ld t0, 0(t0)
+  ld t1, 0(sp)              # pop a into t1
+  addi sp, sp, 16
+  add t0, t1, t0            # a + b
+  sd t0, -40(s0)            # store into c
+  addi t0, s0, -40          # return c
+  ld t0, 0(t0)
+  mv a0, t0
+  j .L1
+.L1:
+  ld ra, -8(s0)             # epilogue
+  mv t2, s0
+  ld s0, -16(t2)
+  mv sp, t2
+  jalr zero, 0(ra)
+\end{lstlisting}
+
+The epilogue restores \code{sp} from \code{s0} instead of adding the frame size back. This stays correct
+even if \code{return} is reached while temporaries are still pushed on the stack. Every \code{return}
+jumps to the single epilogue label. When the frame exceeds 2047 bytes, a 12-bit immediate no longer fits,
+and \code{addi_any} and \code{frame_mem} fall back to \code{li t2, imm} followed by \code{add}.
+
+\section{Expressions}
+
+\subsection{A stack machine}
+
+Expressions are evaluated like a stack machine, with two rules:
+
+\begin{enumerate}
+  \item Every expression leaves its result in \code{t0}.
+  \item A binary operation evaluates its left side, pushes \code{t0}, evaluates its right side, and pops the
+        left value into \code{t1}. At that point \code{t1} holds the left operand and \code{t0} the right one.
+\end{enumerate}
+
+\snippet[language=yacc]{../parser.y}{static void push(}{2@end}
+
+Each push takes 16 bytes (8 are used) so that \code{sp} stays 16-byte aligned, even when a call happens in
+the middle of an expression.
+
+The code is long, but every expression is handled the same way, which makes it easy to verify. Since
+temporaries live on the stack rather than in registers, \textbf{nothing has to be saved around a call}:
+no caller-saved register ever holds a live value. The specification forbids optimisation anyway, so code
+size is not a goal.
+
+\subsection{Binary operators}
+
+\snippet[language=yacc]{../parser.y}{static void gen_binary}{@end}
+
+After the push and pop, \code{gen_binary} emits the instruction for the operator:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lp{6.2cm}L@{}}
+\toprule
+Operator & Instructions (\code{t1} left, \code{t0} right) & Note \\
+\midrule
+\code{+ - *} & \code{add}, \code{sub}, \code{mul} & pointer operands are scaled, see Section~\ref{sec:ptr} \\
+\code{/ \%} & \code{div}, \code{rem} & RISC-V truncates towards zero, as C does \\
+\code{& | ^} & \code{and}, \code{or}, \code{xor} & \\
+\code{<< >>} & \code{sll}, \code{sra} & \code{>>} on a signed value is an arithmetic shift \\
+\code{<} & \code{slt t0, t1, t0} & \\
+\code{>} & \code{slt t0, t0, t1} & operands swapped \\
+\code{<=} & \code{slt t0, t0, t1}; \code{xori t0, t0, 1} & \code{a <= b} is \code{!(b < a)} \\
+\code{>=} & \code{slt t0, t1, t0}; \code{xori t0, t0, 1} & \code{a >= b} is \code{!(a < b)} \\
+\code{==} & \code{sub}; \code{seqz} & equal when the difference is 0 \\
+\code{!=} & \code{sub}; \code{snez} & \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Every comparison yields 0 or 1, as in C. The \code{uns} flag and \code{sltu}/\code{divu}/\code{remu}/\code{srl}
+are the Bonus's unsigned variants.
+
+\subsection{Short-circuit evaluation}
+
+\code{&&} and \code{||} must not evaluate both sides first: in \code{a && f()}, \code{f} must not be called
+when \code{a} is 0. They are therefore handled at the top of \code{gen_binary}. After the left side, a 0 for
+\code{&&} or a non-zero value for \code{||} jumps straight to \code{short_label}, which sets the result to 0 or 1
+respectively. Otherwise the right side is evaluated and normalised to 0 or 1 with \code{snez}. The test
+\file{short_circuit} checks that a right-hand call with a side effect is skipped.
+
+\subsection{Lvalues and assignment}
+
+Everything that needs an \emph{address} --- the left side of an assignment, \code{&}, \code{++} --- calls
+\code{gen_addr}, which leaves the address in \code{t0}:
+
+\snippet[language=yacc]{../parser.y}{static void gen_addr}{@end}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+Node & Address \\
+\midrule
+\code{E_VAR} & a local is at \code{s0 + offset}; a global is \code{la t0, name} \\
+\code{E_DEREF} (\code{*p}) & the value of \code{p} is the address, so just \code{gen_expr(p)} \\
+\code{E_INDEX} (\code{a[i]}) & base plus \code{i << W_SHIFT}; the base of an array is its own address, a pointer is loaded first \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Reading a variable is \code{gen_addr} followed by a load. The one exception is the \textbf{name of an array}:
+its value is its address, so no load follows. This is what makes \code{int *p = arr;} and \code{*(arr + i)} work:
+
+\snippet[language=yacc]{../parser.y}{if (!s->is_array) ins(}{+1}
+
+An assignment pushes the address of the left side, evaluates the right side, pops the address into
+\code{t1} and stores with \code{sd t0, 0(t1)}. The value stays in \code{t0}, so chained assignments such as
+\code{a = b = 1} work. Prefix and postfix \code{++}/\code{--} differ only in which value is left in \code{t0}:
+
+\snippet[language=yacc]{../parser.y}{int step = }{break;}
+
+\subsection{Pointer arithmetic}
+\label{sec:ptr}
+
+In C, pointer arithmetic counts elements: \code{p + 1} points to the next element, so the byte offset is
+scaled by the element size. \code{is_ptr_expr} decides whether an expression yields a pointer:
+
+\snippet[language=yacc]{../parser.y}{static int is_ptr_expr}{@end}
+
+\code{gen_binary} uses the result for both operands: for \code{+}, the non-pointer operand is shifted left by
+\code{W_SHIFT} (3 on RV64); for \code{-}, a pointer minus an integer scales the integer, and a pointer minus a
+pointer divides the byte difference with \code{srai} to get an element count. The public test Jump/1 needs
+this for \code{int *f1 = fib + i - 1}: \code{fib + i} is a pointer, so subtracting 1 is scaled too. For the same
+reason \code{p++} steps by one word rather than by 1.
+
+\section{Control Flow}
+
+\subsection{Labels and conditional jumps}
+
+Each control structure takes fresh numbers from \code{new_label()} and emits them as \code{.L<n>}. A false
+condition has to jump away, but a RISC-V conditional branch such as \code{beqz} reaches only $\pm$4\,KB, which
+a long loop body can exceed. The generator therefore always branches \emph{over} an unconditional jump:
+
+\snippet[language=yacc]{../parser.y}{static void jump_if_zero}{@end}
+
+\code{j} reaches $\pm$1\,MB, far more than any program in this assignment needs.
+
+\subsection{Loops}
+
+The labels are arranged as follows; \code{break} jumps to \code{end}, and \code{continue} to the label marked
+$\star$:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+Loop & Generated layout \\
+\midrule
+\code{while (c) s} & \code{cond}$\star$: test \code{c}, if 0 jump to \code{end}; \code{s}; \code{j cond}; \code{end}: \\
+\code{do s while (c);} & \code{body}: \code{s}; \code{cont}$\star$: test \code{c}, if 0 jump to \code{end}; \code{j body}; \code{end}: \\
+\code{for (i; c; u) s} & \code{i}; \code{cond}: test \code{c}, if 0 jump to \code{end}; \code{s}; \code{cont}$\star$: \code{u}; \code{j cond}; \code{end}: \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\snippetafter{int l_cond, l_body}
+\snippet[language=yacc]{../parser.y}{case S_FOR:}{break;}
+
+In a \code{for} loop, \code{continue} must jump to the step \code{u}, not to the condition; otherwise the step
+would be skipped and the loop would never end. Each part may be omitted, and an omitted condition simply
+emits no test, giving an infinite loop.
+
+The targets of \code{break} and \code{continue} are kept on two stacks. A loop pushes its labels on entry and
+pops them on exit, so \code{break} always reaches the innermost loop:
+
+\snippet[language=yacc]{../parser.y}{static void push_loop}{@end}
+
+\subsection{Switch}
+
+\snippet[language=yacc]{../parser.y}{static void gen_switch}{@end}
+
+A \code{switch} is emitted in two parts:
+
+\begin{enumerate}
+  \item \textbf{Dispatch.} The value is stored in its own frame slot (the extra slot reserved by
+        \code{count_slots}). Each \code{case} value is evaluated, XOR-ed with the stored value, and a zero
+        result jumps to that case's label. If nothing matches, control goes to \code{default}, or to the end
+        when there is no \code{default}.
+  \item \textbf{Bodies.} The case bodies are emitted in source order, each preceded by its label. Because they
+        are contiguous, a case without \code{break} falls through into the next one, exactly as in C.
+\end{enumerate}
+
+The value lives in the frame rather than a register because evaluating a \code{case} value overwrites
+\code{t0} and \code{t1}. A \code{switch} pushes only a \code{break} target, not a \code{continue} target, so a
+\code{continue} inside a \code{switch} applies to the enclosing loop, again as in C.
+
+\section{Functions}
+
+\subsection{Calls}
+
+\snippet[language=yacc]{../parser.y}{static void gen_call}{@end}
+
+Arguments are evaluated left to right and pushed one by one. Only after all of them are evaluated are they
+popped, in reverse order, into \code{a(n-1)} \ldots\ \code{a0}. Loading \code{a0}--\code{a7} directly would not
+work, because a later argument may itself be a call --- \code{gcd(b, modulo(&a, &b))} --- and would overwrite
+the registers already loaded. After the call, the result is copied from \code{a0} to \code{t0}, following the
+``result in \code{t0}'' rule. Calls to the intrinsics are diverted to \code{gen_intrinsic} (Bonus).
+
+\subsection{Recursion}
+
+Recursion needs no special handling. Each call has its own frame with its own parameters and locals,
+temporaries live on the stack, and \code{ra} and \code{s0} are saved by the prologue. The public test
+Function/0 (\code{gcd}) and my test \file{calls} (\code{fact(10)}) both exercise recursion.
+
+\subsection{Declarations}
+
+The test programs declare prototypes before the definitions. \code{gen_program} adds every \code{D_FUNC} to
+the symbol table (recording whether it returns a pointer) and emits code only for those with a body. A
+function that is called without being declared, such as \code{digitalWrite} or \code{delay}, is not an error:
+the generator emits \code{jal} and leaves the symbol to the linker.
+
+\section{Global Variables}
+
+\snippet[language=yacc]{../parser.y}{static void gen_global}{@end}
+
+Globals live in \code{.data}, one \code{.dword} per element, with \code{.zero} filling elements that have no
+initialiser. Initialisers must be integer constants, optionally negative; this is a limit of the assembler,
+not an optimisation. Globals are read and written through \code{la t0, name}.
+
+\section{Target Parameters}
+
+\snippet[language=yacc]{../parser.y}{static int W = 8;}{+5}
+
+Every size-dependent decision goes through these variables; the code never hard-codes 8 or \code{ld}.
+With \code{--rv32}, \code{main} calls \code{use_rv32()}, which switches them to 4, 2, \code{lw}, \code{sw} and
+\code{.word}. This is required by the Bonus, and it also lets the whole HW3 test suite run on RV32 as an extra
+check.
+
+\section{Testing}
+
+\subsection{Procedure}
+
+\code{make test} (script \file{tests/run.sh}) runs each test program in the Docker container:
+
+\begin{lstlisting}[language=bash,numbers=none]
+./codegen < test.c                                       # -> codegen.S
+riscv64-unknown-elf-gcc -o prog spike-sample/main.c codegen.S
+spike pk prog | grep '^Arduino'                          # -> output.txt
+diff output.txt test.expected
+\end{lstlisting}
+
+\file{main.c} is the TA's Spike sample. It implements \code{digitalWrite} and \code{delay} by printing lines
+such as \code{Arduino digitalWrite(26, 1);}, and calls \code{codegen()}. With \code{TARGET=rv32}, the script
+uses the RV32 compiler and proxy kernel instead.
+
+\subsection{Expected output}
+
+The expected output of each public test is written by hand from the comments in the test program, as four
+Arduino log lines. It is cross-checked with \file{tests/native_expected.sh}, which compiles the same C program
+with the host gcc (\file{native_harness.h} supplies \code{digitalWrite}, \code{delay} and \code{main}) and runs
+it; the native results match the hand-written files exactly. The expected output of my own tests comes from
+this native run rather than from hand calculation.
+
+\subsection{Public tests}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lLl@{}}
+\toprule
+Test & Features & Expected log \\
+\midrule
+Basic/0 & function structure, Arduino calls, \code{HIGH}/\code{LOW} & (26,1) 1000 (26,0) 1000 \\
+ArithmeticExpression/0, 1 & locals, arithmetic, parentheses & e.g.\ (26,1) 3000 (26,0) 3000 \\
+Pointer/0, 1 & \code{&}, \code{*}, negative division, re-pointing & e.g.\ (28,1) 4000 (28,0) 4000 \\
+Jump/0 & \code{for}, \code{while}, \code{if}/\code{else}, arrays, \code{*(arr+i)}, block-local declarations & (26,1) 3000 (26,0) 1000 \\
+Jump/1 & \code{do-while}, nested \code{if}, \code{fib + i - 1} & (28,1) 6000 (28,0) 4000 \\
+Function/0 & recursive \code{gcd}, \code{const int *} parameters, address of a parameter & (28,1) 6000 (28,0) 1000 \\
+Function/1 & arrays as arguments, recursion & (26,1) 8000 (26,0) 3000 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Here (26,1) stands for \code{Arduino digitalWrite(26, 1);} and a bare number for \code{Arduino delay(...)}.
+
+\subsection{My own tests}
+
+The hidden tests are described as ``similar to level A (Function)''. To cover what the public tests do not,
+I added six programs:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+Test & Coverage \\
+\midrule
+\file{ops} & every arithmetic, bitwise, comparison and logical operator; \code{/}, \code{\%} and \code{>>} on negative values \\
+\file{control} & \code{continue}, \code{break}, nested \code{if}-\code{else}, \code{do-while} with \code{continue}, \code{switch} fall-through and \code{default}, \code{for(;;)} \\
+\file{calls} & six parameters, calls as arguments, recursive \code{fact(10)}, swap through pointers, assigning through a returned pointer \\
+\file{pointer_array} & pointer \code{++}/\code{--}, pointer difference, \code{&a[i]}, array initialisers, global scalars and arrays \\
+\file{scope_incdec} & block-scope shadowing, values of prefix and postfix \code{++}/\code{--}, chained assignment \\
+\file{short_circuit} & \code{&&} and \code{||} skip a right-hand call with a side effect \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Limitations}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}LL@{}}
+\toprule
+Limitation & Reason \\
+\midrule
+Only integers and single-level pointers; float and string literals are reported as errors & not used by the test programs \\
+Arrays are one-dimensional with a constant length & not used by the test programs \\
+At most 8 parameters & more would be passed on the stack; not used by the test programs \\
+On RV64, \code{int} is computed in 8 bytes, so overflow differs from a 32-bit \code{int} & one word per value is a deliberate simplification; no test relies on overflow \\
+The generated code is long & inherent in the stack-machine design; the specification forbids optimisation \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\end{document}

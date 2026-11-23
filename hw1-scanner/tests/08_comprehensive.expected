@@ -1,0 +1,20 @@
+#key:int
+#id:main
+#punc:(
+#punc:)
+#punc:{
+1:int main() {
+#key:if
+#punc:(
+#id:x
+#op:>=
+#float:1.5
+#punc:)
+#punc:{
+#key:return
+#macro:MAX
+#punc:;
+#punc:}
+2:	if (x >= 1.5) { return MAX; } /* done */
+#punc:}
+3:}

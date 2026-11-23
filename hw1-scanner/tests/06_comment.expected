@@ -1,0 +1,17 @@
+#key:int
+#id:a
+#punc:;
+1:int a; // line comment "x
+#key:int
+#id:b
+#punc:;
+2:/*"abc*/ int b;
+3:/* multi
+4:   line ** comment
+#key:int
+#id:c
+#punc:;
+#key:int
+#id:d
+#punc:;
+5:*/ int c; /**/ int d;

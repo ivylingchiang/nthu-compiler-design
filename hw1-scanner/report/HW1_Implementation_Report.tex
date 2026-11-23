@@ -1,0 +1,270 @@
+\documentclass[12pt]{article}
+\usepackage{report}
+
+\begin{document}
+
+\reporttitle{CS340400 Compiler Design - Homework 1 Implementation Report}
+
+\section{Overview}
+
+This assignment implements a scanner for a subset of C with flex. The scanner reads source code,
+prints every token with its category, and after each line prints the line number together with
+the original text of that line. Two directives, \code{#pragma source on|off} and
+\code{#pragma token on|off}, turn each kind of output on or off.
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Files & \file{scanner.l}, \file{makefile} \\
+Tests & 8 cases in \file{tests/}: one per grading item plus a comprehensive case --- \textbf{8/8 pass} \\
+Build & GNU gcc 13.3, \textbf{0 warnings} (also with \code{-Wall}) \\
+Usage & \code{make scanner && ./scanner < input.c}; \code{make test} runs all cases \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Pragmas, escape sequences, patterns inside comments and a last line without a newline are the places
+where a straightforward scanner goes wrong; Section~\ref{sec:diff} summarises how each one is handled.
+
+\section{Output Format}
+
+The specification asks for two kinds of output, interleaved in input order:
+
+\begin{itemize}
+  \item every token as \code{#<category>:<text>}, e.g.\ \code{#key:int}, \code{#id:a}, \code{#op:=};
+  \item at the end of every line, \code{<line number>:<line text>}, e.g.\ \code{2:char a = 'i';}.
+\end{itemize}
+
+Comments and pragmas produce no tokens, but the lines that contain them are still printed.
+\code{#pragma token off} silences only the tokens, and \code{#pragma source off} silences only the
+lines.
+
+\begin{lstlisting}[language={},numbers=none,title={\codetitle{input: int a = 1; // x}}]
+#key:int
+#id:a
+#op:=
+#integer:1
+#punc:;
+1:int a = 1; // x
+\end{lstlisting}
+
+\section{Structure}
+
+The scanner is a single flex file with the usual three parts:
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Part & Contents \\
+\midrule
+Definitions \code{\%{ ... \%}} & line buffer, pragma switches, output helpers, \code{YY_USER_ACTION} \\
+Definitions (patterns) & \code{\%option}, \code{\%x COMMENT}, named patterns (\code{ESCAPE}, \code{STRING}, \code{INTEGER}, \ldots) \\
+Rules & comments, pragmas, keywords, macros, identifiers, literals, operators, punctuation, whitespace, EOF, error \\
+User code & \code{main()} calls \code{yylex()} once \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The \emph{order} of the rules matters. When several rules match, flex takes the longest match, and
+breaks ties in favour of the rule written first. Consequently:
+
+\begin{itemize}
+  \item \code{for} matches both the keyword rule and \code{{IDENTIFIER}} with the same length, so the
+        keyword rule, which comes first, wins;
+  \item \code{format} matches 6 characters as an identifier but only 3 as a keyword, so it is an identifier;
+  \item macros such as \code{NULL} and \code{INT_MAX} are placed before \code{{IDENTIFIER}} for the same reason,
+        while \code{NULLX} is longer and therefore an identifier.
+\end{itemize}
+
+\subsection{Output helpers}
+
+\snippet[language=flex]{../scanner.l}{static void append_line(}{3@end}
+
+\begin{itemize}
+  \item \code{append_line} appends the matched text to \code{line_buf}; anything beyond 4096 bytes is
+        cut off instead of overflowing the buffer.
+  \item \code{end_line} is called by the newline rule. It prints the line if \code{source_on} is set,
+        then clears the buffer and increments the line number.
+  \item \code{emit} is called by every token rule and prints the token if \code{token_on} is set.
+\end{itemize}
+
+A common alternative is to give each token an enum value and decide its category in \code{main} with
+range checks such as \code{token >= 30 && token <= 50}. Calling \code{emit("key")} directly in the
+rule keeps the category next to the pattern, needs no token table, and cannot break when an enum is
+reordered.
+
+\section{Implementation Details}
+
+\subsection{Collecting the line text with \texttt{YY\_USER\_ACTION}}
+
+\snippet[language=flex]{../scanner.l}{define YY_USER_ACTION}{+1}
+
+flex expands \code{YY_USER_ACTION} before the action of \emph{every} rule. Because of this, whatever a
+rule matches --- a keyword, whitespace, a comment or a pragma --- is appended to \code{line_buf}
+automatically, and no rule has to do it by hand. The newline is the only exception: it marks the
+end of the line and is handled by the \code{\n} rule, which calls \code{end_line()}.
+
+This guarantees that the printed line is always complete, including the parts that produce no
+tokens, such as comments, pragmas and whitespace.
+
+\subsection{Pragmas}
+
+\snippet[language=flex]{../scanner.l}{"#pragma"}{+2}
+\snippet[language=flex]{../scanner.l}{{PRAGMA}source}{+4}
+
+Two details make the pragma rules work:
+
+\begin{enumerate}
+  \item The pattern is anchored with \code{^}, so a pragma must start a line (indentation is allowed).
+  \item The pattern does \emph{not} include the newline. If the pragma rule consumed \code{\n}, \code{end_line()}
+        would not run for that line: the pragma line would merge with the next one and every following
+        line number would be off by one. Leaving the newline to the \code{\n} rule keeps both the
+        numbering and the line text correct.
+\end{enumerate}
+
+The switches also take effect at the right moment. \code{#pragma source off} clears
+\code{source_on} \emph{before} its own newline is scanned, so the directive line itself is not printed,
+while \code{#pragma source on} prints itself. Test \file{07_pragma} checks exactly this:
+
+\begin{lstlisting}[language={},numbers=none,title={\codetitle{tests/07\_pragma: input (left) and expected output, abridged (right)}}]
+1  #pragma source on        1:#pragma source on
+2  char a = 'i';            #key:char ... #punc:;   2:char a = 'i';
+3  #pragma<TAB>source  off  (not printed)
+4  int b;                   #key:int #id:b #punc:;  (line text not printed)
+5  #pragma source on        5:#pragma source on
+6  #pragma token off        6:#pragma token off
+7  int c;                   7:int c;                (no tokens)
+8  #pragma token on         8:#pragma token on
+9  int d;                   #key:int #id:d #punc:;  9:int d;
+\end{lstlisting}
+
+\subsection{Comments: an exclusive start condition}
+
+\snippet[language=flex]{../scanner.l}{"//"}{+6}
+
+Block comments use the start condition \code{COMMENT}, declared with \code{\%x} as \emph{exclusive}: while
+inside it, only rules prefixed with \code{<COMMENT>} are active. With \code{\%s} (inclusive), the other rules
+would stay active inside comments. For \code{/*"abc*/}, the rule for an unterminated string would
+match a longer prefix than the comment rule, and the scanner would report an error.
+
+The body of a comment is split into three rules, none of which crosses a newline:
+
+\begin{center}
+\begin{tabularx}{0.92\linewidth}{@{}lL@{}}
+\toprule
+Rule & Matches \\
+\midrule
+\code{[^*\n]+} & ordinary text without \code{*} \\
+\code{"*"+[^*/\n]*} & one or more \code{*} not followed by \code{/}, e.g.\ \code{**x} \\
+\code{"*"+"/"} & the end of the comment, including \code{**/} \\
+\code{\n} & a line break inside the comment: call \code{end_line()} as usual \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A single pattern for the whole comment would swallow the newlines, and the lines of a multi-line
+comment could no longer be printed one by one. With the split rules, \code{YY_USER_ACTION} still
+collects the comment text and each newline ends its line normally.
+
+\subsection{Strings and character constants}
+
+\snippet[language=flex]{../scanner.l}{ESCAPE}{+3}
+
+A string body is any number of three alternatives: a valid escape sequence, a backslash followed by
+any character (\code{\\.}, for escapes the specification does not list), or any character other than
+\code{"}, \texttt{\textbackslash} and newline.
+
+Because \code{\"} is consumed as one escape, \code{"a\"b"} is a single string and does not end at the
+inner quote. A simpler pattern such as \code{\042[^\042\n]*\042} would stop there.
+\code{"a\nb"} is likewise one token, \code{#string:"a\nb"}, quotes included, not three tokens split at
+the escape. A character constant uses the same alternatives but
+allows exactly \emph{one} of them between the quotes.
+
+\subsection{Numbers}
+
+\snippet[language=flex]{../scanner.l}{INTEGER}{+2}
+
+The specification treats a sign as part of the number: \code{-0} is one integer, while \code{- 0} is an
+operator followed by an integer. Floating-point numbers accept the forms \code{1.}, \code{.5} and
+\code{1.5}. Because flex prefers the longest match, \code{a-1} is scanned as \code{#id:a} followed by
+\code{#integer:-1}; Section~\ref{sec:assume} discusses this.
+
+\subsection{End of file}
+
+\snippet[language=flex]{../scanner.l}{<<EOF>>}{+5}
+
+A line is printed when its newline is scanned, so without extra handling a last line that has no
+trailing newline would be lost. The \code{<<EOF>>} rule is active in both start conditions and prints the
+buffer if it still holds text, which also covers a comment that runs to the end of the file.
+
+\subsection{Errors and compiler warnings}
+
+\snippet[language=flex]{../scanner.l}{lex_error(); }{+1}
+
+\begin{itemize}
+  \item The catch-all rule \code{.} comes last. Any character that no other rule accepts prints
+        \code{Error at line N: <char>} and exits with status 1.
+  \item \code{\%option noyywrap} removes the need to link with \code{-lfl}; \code{nounput} and
+        \code{noinput} stop flex from generating the unused functions \code{yyunput} and \code{input},
+        which would trigger unused-function warnings under \code{-Wall}.
+  \item The file includes \code{<stdlib.h>} for \code{exit()}; without it GNU gcc reports an implicit
+        declaration, and the grading policy deducts 20 points for any warning.
+\end{itemize}
+
+\section{Testing}
+
+\code{make test} runs \file{./scanner} on every \file{tests/*.c} and compares the output with the
+matching \file{.expected} file; a failing case writes its diff to \file{tests/*.diff}.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lP{4.4cm}L@{}}
+\toprule
+Test & Grading item (points) & Focus \\
+\midrule
+\file{01_keyword_id} & Keywords \& Identifiers (10) & every keyword; \code{Int}, \code{_abc}, \code{x_1} are identifiers \\
+\file{02_macro} & Macros (10) & all 9 macros; \code{NULLX} is longer than \code{NULL}, so it is an identifier \\
+\file{03_op_punc} & Operators \& Punctuations (15) & two-character operators win over one-character ones \\
+\file{04_number_char} & Integers, Floats, Characters (15) & signs (\code{-0} vs.\ \code{- 0}), \code{5.}, \code{.5}, escapes \\
+\file{05_string} & Strings (15) & \code{\"} and \code{\n} inside one token; \code{//} and \code{/*} inside strings \\
+\file{06_comment} & Comments (15) & multi-line comments, \code{**}, \code{/**/}, a quote inside a comment \\
+\file{07_pragma} & Pragma Directives (10) & all four pragmas, tabs and extra spaces, when the switch applies \\
+\file{08_comprehensive} & Comprehensive (10) & everything together; the last line has no newline \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All 8 cases pass.
+
+\section{Pitfalls and How They Are Handled}
+\label{sec:diff}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}rLL@{}}
+\toprule
+\# & Pitfall & Handling \\
+\midrule
+1 & A pragma pattern that consumes the newline shifts every later line number & No \code{\n} in the pattern; anchor with \code{^} \\
+2 & A naive string pattern ends early at \code{\"} & \code{STRING} repeats ``escape or ordinary character'' \\
+3 & Escape sequences can split one string into several tokens & The whole string is one token \\
+4 & With an inclusive start condition, a quote inside a comment causes an error & \code{\%x COMMENT} \\
+5 & A last line without a newline is never printed & \code{<<EOF>>} rule prints the remaining buffer \\
+6 & A missing \code{<stdlib.h>} or \code{while (token = yylex())} warns under \code{-Wall} & Include it; \code{main} calls \code{yylex()} once \\
+7 & Deciding token categories by enum ranges is fragile & Each rule calls \code{emit("<category>")} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Assumptions}
+\label{sec:assume}
+
+The course's reference implementation, \code{golden_scanner}, is no longer available, so the following
+behaviour is inferred from the specification and could not be checked against it:
+
+\begin{itemize}
+  \item A string is printed as a single token (Section 4.4).
+  \item \code{a-1} is scanned as \code{#id:a}, \code{#integer:-1}. The specification only contrasts
+        \code{- 0} with \code{-0}; flex's longest-match rule produces this result.
+  \item A last line without a trailing newline is still printed with its line number.
+\end{itemize}
+
+\end{document}

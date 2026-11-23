@@ -1,0 +1,12 @@
+Arduino delay(16);
+Arduino delay(21);
+Arduino delay(5);
+Arduino delay(100);
+Arduino delay(101);
+Arduino delay(101);
+Arduino delay(999);
+Arduino delay(103);
+Arduino delay(999);
+Arduino delay(999);
+Arduino delay(2);
+Arduino digitalWrite(0, 1);

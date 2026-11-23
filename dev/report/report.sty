@@ -1,0 +1,236 @@
+% Shared style for the implementation reports (compile with LuaLaTeX).
+%
+% Look: follows the original Word reports in this repo -- Calibri-style blue
+% headings over a Times-style body, numbered sections, no cover page.
+%
+% Code excerpts are read from the real source files at build time:
+%
+%   \snippet[<listings options>]{<file>}{<from>}{<to>}
+%
+%     <file>  path relative to the .tex file
+%     <from>  first line = first line containing this text (plain text, not a regex)
+%     <to>    last line, one of:
+%               +N          take N lines
+%               @end        first line after <from> that starts with "}"
+%               K@end       the K-th such line
+%               N@rule      the N-th yacc rule end (a line holding only ';')
+%               <text>      first line after <from> containing <text>
+%   A leading ^ in <from>/<to> text means "the line starts with".
+%   \snippetafter{<text>}   (optional, before \snippet) start searching for <from>
+%                           after the first line containing <text>
+%
+% A missing anchor stops the build, so a report can never quote the wrong code.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{report}
+
+\RequirePackage[letterpaper, top=1in, bottom=1in, left=1.25in, right=1.25in]{geometry}
+\RequirePackage{fontspec}
+\setmainfont{TeX Gyre Termes}
+\newfontfamily\headfont{Carlito}[Ligatures={TeX,NoCommon}]
+\setmonofont{Latin Modern Mono}[Scale=1.0]
+
+\RequirePackage[dvipsnames]{xcolor}
+\definecolor{titleblue}{HTML}{2F5496}
+\definecolor{headblue}{HTML}{4F81BD}
+\definecolor{codebg}{HTML}{F7F8FA}
+\definecolor{codeframe}{HTML}{D5DAE1}
+\definecolor{codecomment}{HTML}{6A737D}
+\definecolor{codekeyword}{HTML}{1F4E9B}
+\definecolor{codestring}{HTML}{22863A}
+
+\RequirePackage{titlesec}
+\titleformat{\section}{\headfont\bfseries\fontsize{13}{16}\selectfont\color{headblue}}{\thesection.}{0.3em}{}
+\titleformat{\subsection}{\headfont\bfseries\fontsize{12}{15}\selectfont\color{headblue}}{\thesubsection}{0.4em}{}
+\titleformat{\subsubsection}{\headfont\bfseries\normalsize\color{headblue}}{}{0em}{}
+\titlespacing*{\section}{0pt}{22pt}{10pt}
+\titlespacing*{\subsection}{0pt}{14pt}{6pt}
+\titlespacing*{\subsubsection}{0pt}{9pt}{3pt}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{8pt}
+\linespread{1.1}
+\AtBeginDocument{\raggedright}
+
+\RequirePackage{enumitem}
+\setlist{topsep=2pt, itemsep=2pt, parsep=0pt}
+
+\RequirePackage{booktabs, tabularx, array, longtable}
+\renewcommand{\arraystretch}{1.2}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\RequirePackage{tikz}
+\usetikzlibrary{positioning, arrows.meta, calc}
+
+\RequirePackage{caption}
+\captionsetup{font=small, labelfont={bf, color=headblue}}
+
+\RequirePackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyfoot[C]{\headfont\small\color{gray}\thepage}
+
+\RequirePackage[colorlinks=true, linkcolor=headblue, urlcolor=headblue]{hyperref}
+
+% ---------- title block ----------
+\newcommand{\reporttitle}[1]{%
+  {\raggedright\hyphenpenalty=10000\headfont\bfseries\fontsize{14}{18}\selectfont\color{titleblue}#1\par}%
+  \vspace{-10pt}%
+}
+
+% ---------- inline helpers ----------
+% Inline code, printed verbatim. Works inside tables and other arguments:
+%   # ~ ^ _ & \n \t can be written as is; write % as \%, unbalanced braces as \{ \}.
+\newcommand{\code}[1]{\texttt{\directlua{report.inline("\luaescapestring{\detokenize{#1}}")}}}
+\newcommand{\file}[1]{\code{#1}}
+\newcommand{\note}[1]{%
+  \par\smallskip
+  \noindent\fcolorbox{codeframe}{codebg}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule}{\small #1}}%
+  \par\smallskip}
+
+% ---------- listings ----------
+\RequirePackage{listings}
+\lstdefinelanguage{riscv}{
+  morekeywords={addi,add,sub,mul,div,divu,rem,remu,and,or,xor,sll,srl,sra,slli,srai,
+    slt,sltu,xori,seqz,snez,neg,not,li,la,mv,ld,sd,lw,sw,j,jal,jalr,beqz,bnez,nop,
+    ukadd8,uksub8,cmpeq8,ucmplt8},
+  morecomment=[l]{\#},
+  sensitive=true
+}
+\lstdefinelanguage{flex}[ANSI]{C}{
+  morekeywords={BEGIN,INITIAL,COMMENT,yytext,yyleng,yylval},
+}
+\lstdefinelanguage{yacc}[ANSI]{C}{
+  morekeywords={yylval,yyerror,yylex},
+}
+\lstset{
+  basicstyle=\ttfamily\fontsize{8.4}{10.2}\selectfont,
+  numbers=left,
+  numberstyle=\ttfamily\tiny\color{gray},
+  numbersep=8pt,
+  xleftmargin=20pt,
+  framexleftmargin=4pt,
+  frame=single,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekeyword}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  columns=fixed,
+  keepspaces=true,
+  tabsize=4,
+  upquote=true,
+  aboveskip=6pt,
+  belowskip=6pt,
+  captionpos=t,
+  language=C,
+}
+\newcommand{\codetitle}[1]{\hfill{\ttfamily\scriptsize\color{gray}#1}}
+
+\RequirePackage{needspace}
+\RequirePackage{luacode}
+\begin{luacode*}
+report = report or {}
+report.after = nil
+
+-- undo what \detokenize adds: '#' is doubled, a space follows every control word
+function report.inline(s)
+  s = s:gsub("##", "#"):gsub("(\\%a+) ", "%1"):gsub("\\([%%{}])", "%1")
+  -- allow a line break after _ - . / , = so long identifiers and paths do not overflow
+  for chunk, sep in s:gmatch("([^_%-%./,=]*)([_%-%./,=]?)") do
+    if chunk ~= "" then tex.sprint(-2, chunk) end
+    if sep ~= "" then tex.sprint(-2, sep); tex.sprint("\\allowbreak{}") end
+  end
+end
+
+local function read_lines(path)
+  local f = io.open(path, "r")
+  if not f then tex.error("snippet: cannot open " .. path) return {} end
+  local lines = {}
+  for line in f:lines() do lines[#lines + 1] = (line:gsub("\r$", "")) end
+  f:close()
+  return lines
+end
+
+local function find(lines, start, pred, what, path)
+  for i = start, #lines do
+    if pred(lines[i]) then return i end
+  end
+  error(string.format("snippet: %s not found in %s", what, path))
+end
+
+-- "^text": the line starts with text; otherwise the line contains text
+local function contains(text)
+  if text:sub(1, 1) == "^" and #text > 1 then
+    local head = text:sub(2)
+    return function(line) return line:sub(1, #head) == head end
+  end
+  return function(line) return line:find(text, 1, true) ~= nil end
+end
+
+-- end of a yacc rule: a line holding only ';'
+local function rule_end(line) return line:match("^%s*;%s*$") ~= nil end
+
+local function starts_brace(line) return line:sub(1, 1) == "}" end
+
+function report.snippet(opts, path, from, to)
+  -- \detokenize doubles '#'; undo that so anchors may contain it
+  from = from:gsub("##", "#")
+  to = to:gsub("##", "#")
+  local lines = read_lines(path)
+  local start = 1
+  if report.after then
+    start = find(lines, 1, contains(report.after), "after '" .. report.after .. "'", path) + 1
+    report.after = nil
+  end
+  local first = find(lines, start, contains(from), "from '" .. from .. "'", path)
+
+  local last
+  local n = to:match("^%+(%d+)$")
+  local k = to:match("^(%d*)@end$")
+  if n then
+    last = first + tonumber(n) - 1
+  elseif k ~= nil then
+    local count = tonumber(k) or 1
+    last = first
+    for _ = 1, count do last = find(lines, last + 1, starts_brace, "closing brace", path) end
+  elseif to:match("^%d*@rule$") then
+    local count = tonumber(to:match("^(%d*)")) or 1
+    last = first
+    for _ = 1, count do last = find(lines, last + 1, rule_end, "end of rule", path) end
+  else
+    last = find(lines, first, contains(to), "to '" .. to .. "'", path)
+  end
+  if last > #lines then last = #lines end
+
+  local shown = path:gsub("^%.%./", ""):gsub("^%.%./", "")
+  local range = (first == last) and tostring(first) or string.format("%d-%d", first, last)
+  local title = string.format("\\codetitle{\\detokenize{%s}:%s}", shown, range)
+  local o = opts
+  if o ~= "" then o = o .. "," end
+  local listing = string.format(
+    "\\lstinputlisting[%sfirstline=%d,lastline=%d,firstnumber=%d,title={%s}]{%s}",
+    o, first, last, first, title, path)
+  -- short excerpts stay in one piece (and keep their heading with them); long ones may break
+  if last - first < 28 then
+    tex.sprint("\\par\\noindent\\begin{minipage}{\\linewidth}" .. listing .. "\\end{minipage}\\par\\smallskip")
+  else
+    tex.sprint(listing)
+  end
+end
+\end{luacode*}
+
+\newcommand{\snippetafter}[1]{\directlua{report.after = "\luaescapestring{\detokenize{#1}}"}}
+\newcommand{\snippet}[4][]{%
+  \directlua{report.snippet("\luaescapestring{#1}", "\luaescapestring{#2}",
+    "\luaescapestring{\detokenize{#3}}", "\luaescapestring{\detokenize{#4}}")}}
+
+% never leave a heading alone at the bottom of a page
+\RequirePackage{etoolbox}
+\pretocmd{\section}{\needspace{9\baselineskip}}{}{}
+\pretocmd{\subsection}{\needspace{6\baselineskip}}{}{}

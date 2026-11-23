@@ -1,0 +1,4 @@
+Arduino digitalWrite(27, 1);
+Arduino delay(4000);
+Arduino digitalWrite(27, 0);
+Arduino delay(6000);

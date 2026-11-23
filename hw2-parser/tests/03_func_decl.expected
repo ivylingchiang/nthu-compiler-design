@@ -1,0 +1,1 @@
+<func_decl>voidcodegen();</func_decl><func_decl>intf(inta,char*b);</func_decl><func_decl>int*g(constint*p);</func_decl><func_decl>unsignedlongh(longlongx,doubley,floatz);</func_decl>

@@ -1,0 +1,14 @@
+#key:char
+#op:*
+#id:s
+#op:=
+#string:"This is a string"
+#punc:;
+1:char *s = "This is a string";
+#string:"a\nb\"c"
+#string:""
+#string:"it's"
+#string:"x\\"
+#string:"//not comment"
+#string:"/*no*/"
+2:"a\nb\"c" "" "it's" "x\\" "//not comment" "/*no*/"

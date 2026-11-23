@@ -1,0 +1,11 @@
+#macro:NULL
+#macro:__COUNTER__
+#macro:__LINE__
+#macro:INT_MAX
+#macro:INT_MIN
+#macro:CHAR_MAX
+#macro:CHAR_MIN
+#macro:MAX
+#macro:MIN
+#id:NULLX
+1:NULL __COUNTER__ __LINE__ INT_MAX INT_MIN CHAR_MAX CHAR_MIN MAX MIN NULLX
